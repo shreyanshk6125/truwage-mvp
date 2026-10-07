@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from app import schemas
 from app.deepfake_detector import integrity_checker
+from fastapi.middleware.cors import CORSMiddleware
 import shutil
 import uuid
 import os
@@ -11,6 +12,15 @@ app = FastAPI(
     title="TruWage MVP Backend",
     description="API for Video Integrity, AQA, and Fair Wage Prediction",
     version="1.0.0"
+)
+
+# Allow Balraj's frontend to talk to your backend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # In production, restrict this. For MVP hackathon, "*" is fine.
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # --- 1. Check Integrity Endpoint (Deepfake Detection) ---
@@ -108,3 +118,56 @@ async def upload_video(
 @app.get("/")
 def read_root():
     return {"message": "TruWage Backend is running!"}
+
+@app.post("/api/assess", response_model=schemas.AssessResponse)
+async def assess_video(
+    file: UploadFile = File(...),
+    task_type: str = "plumbing",
+    complexity: int = 3
+):
+    """
+    The Master Endpoint for Balraj's Frontend.
+    Runs the deepfake check, and returns the exact 5 variables the UI expects.
+    """
+    video_id = str(uuid.uuid4())
+    
+    # 1. Save the uploaded file temporarily
+    temp_dir = "temp_uploads"
+    os.makedirs(temp_dir, exist_ok=True)
+    file_path = os.path.join(temp_dir, f"{video_id}_{file.filename}")
+    
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    # 2. Run the Deepfake Check (Your Day 2 work!)
+    integrity_result = integrity_checker.predict(file_path)
+    
+    # Clean up the video file immediately to save space
+    os.remove(file_path)
+    
+    # 3. Format the response to match Balraj's exact expectations
+    if not integrity_result["is_authentic"]:
+        # If fake, fail fast and return dummy data for the rest
+        return schemas.AssessResponse(
+            deepfake_status="FAIL",
+            score=integrity_result["confidence_score"],
+            heatmap="https://via.placeholder.com/400x300?text=Fake+Video+Detected", # Dummy image
+            wage_range_text="N/A",
+            audio_filepath="" # No audio if fake
+        )
+        
+    # 4. If real, calculate mock wage (Balraj's GNN will plug in here on Day 3/4)
+    base_wage = 500
+    min_wage = base_wage * (complexity * 0.5)
+    max_wage = min_wage * 1.2
+    
+    # 5. Return the exact 5 variables Balraj needs!
+    return schemas.AssessResponse(
+        deepfake_status="PASS",
+        score=integrity_result["confidence_score"],
+        # MOCK HEATMAP: Ayansh will replace this string with the actual Grad-CAM image path on Day 4
+        heatmap="https://via.placeholder.com/400x300.png?text=Grad-CAM+Heatmap+Coming+Soon", 
+        wage_range_text=f"₹{int(min_wage)} - ₹{int(max_wage)}",
+        # MOCK AUDIO: Balraj will replace this with his Indic TTS path on Day 4
+        audio_filepath="https://www.soundjay.com/buttons/sounds/button-09.mp3" 
+    )

@@ -38,3 +38,14 @@ class FullPipelineResponse(BaseModel):
     integrity_check: IntegrityCheckResponse
     wage_prediction: Optional[WagePredictionResponse] = None
     overall_status: str # "SUCCESS" or "FAILED_INTEGRITY_CHECK"
+
+
+class AssessResponse(BaseModel):
+    """
+    The exact 5 variables Balraj's dashboard.py expects.
+    """
+    deepfake_status: str      # e.g., "PASS" or "FAIL"
+    score: float              # e.g., 0.92
+    heatmap: str              # URL or base64 string of the heatmap image (Ayansh will provide this later)
+    wage_range_text: str      # e.g., "₹500 - ₹600"
+    audio_filepath: str       # URL or local path to the TTS audio file (Balraj will provide this later)
