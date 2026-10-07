@@ -2,16 +2,39 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from app import schemas
 from app.deepfake_detector import integrity_checker
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+import logging
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 import shutil
 import uuid
 import os
 import uuid
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Lifespan event: Runs once on startup and once on shutdown.
+    """
+    # Startup: Load models
+    logger.info("Starting up: Loading AI models...")
+    # The integrity_checker is already loaded at module level, but we can add more models here later
+    logger.info("All models loaded successfully!")
+    
+    yield  # This is where the app runs
+    
+    # Shutdown: Clean up
+    logger.info("Shutting down: Cleaning up resources...")
+    # If we had database connections or other resources, we'd close them here
+
 # Initialize the FastAPI app
 app = FastAPI(
     title="TruWage MVP Backend",
     description="API for Video Integrity, AQA, and Fair Wage Prediction",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan = lifespan 
 )
 
 # Allow Balraj's frontend to talk to your backend
@@ -64,7 +87,17 @@ async def get_wage(request: schemas.WageRequest):
         confidence_interval="85% confidence (Monte Carlo Dropout)",
         reasoning=f"Wage adjusted for {request.complexity}/5 complexity and {request.location_demand} local demand."
     )
-
+# -- Health ---
+@app.get("/health")
+def health_check():
+    """
+    Simple health check endpoint. Balraj's frontend can ping this to verify backend is alive.
+    """
+    return {
+        "status": "healthy",
+        "message": "TruWage backend is running",
+        "models_loaded": True
+    }
 # --- 3. Full Pipeline Endpoint (Upload Video + Voice) ---
 @app.post("/upload_video", response_model=schemas.FullPipelineResponse)
 async def upload_video(
@@ -127,47 +160,63 @@ async def assess_video(
 ):
     """
     The Master Endpoint for Balraj's Frontend.
-    Runs the deepfake check, and returns the exact 5 variables the UI expects.
     """
     video_id = str(uuid.uuid4())
+    file_path = None
     
-    # 1. Save the uploaded file temporarily
-    temp_dir = "temp_uploads"
-    os.makedirs(temp_dir, exist_ok=True)
-    file_path = os.path.join(temp_dir, f"{video_id}_{file.filename}")
-    
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    
-    # 2. Run the Deepfake Check (Your Day 2 work!)
-    integrity_result = integrity_checker.predict(file_path)
-    
-    # Clean up the video file immediately to save space
-    os.remove(file_path)
-    
-    # 3. Format the response to match Balraj's exact expectations
-    if not integrity_result["is_authentic"]:
-        # If fake, fail fast and return dummy data for the rest
+    try:
+        logger.info(f"Received video upload: {file.filename}")
+        
+        # 1. Validate file type
+        if not file.filename.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
+            raise HTTPException(status_code=400, detail="Invalid file type. Please upload a video file.")
+        
+        # 2. Save the uploaded file temporarily
+        temp_dir = "temp_uploads"
+        os.makedirs(temp_dir, exist_ok=True)
+        file_path = os.path.join(temp_dir, f"{video_id}_{file.filename}")
+        
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        logger.info(f"Video saved to {file_path}")
+        
+        # 3. Run the Deepfake Check
+        integrity_result = integrity_checker.predict(file_path)
+        
+        # 4. Format the response
+        if not integrity_result["is_authentic"]:
+            logger.warning(f"Video failed integrity check: {integrity_result['message']}")
+            return schemas.AssessResponse(
+                deepfake_status="FAIL",
+                score=integrity_result["confidence_score"],
+                heatmap="https://via.placeholder.com/400x300?text=Fake+Video+Detected",
+                wage_range_text="N/A",
+                audio_filepath=""
+            )
+        
+        # 5. Calculate mock wage
+        base_wage = 500
+        min_wage = base_wage * (complexity * 0.5)
+        max_wage = min_wage * 1.2
+        
+        logger.info(f"Video passed integrity check. Score: {integrity_result['confidence_score']}")
+        
         return schemas.AssessResponse(
-            deepfake_status="FAIL",
+            deepfake_status="PASS",
             score=integrity_result["confidence_score"],
-            heatmap="https://via.placeholder.com/400x300?text=Fake+Video+Detected", # Dummy image
-            wage_range_text="N/A",
-            audio_filepath="" # No audio if fake
+            heatmap="https://via.placeholder.com/400x300.png?text=Grad-CAM+Heatmap+Coming+Soon",
+            wage_range_text=f"₹{int(min_wage)} - ₹{int(max_wage)}",
+            audio_filepath="https://www.soundjay.com/buttons/sounds/button-09.mp3"
         )
         
-    # 4. If real, calculate mock wage (Balraj's GNN will plug in here on Day 3/4)
-    base_wage = 500
-    min_wage = base_wage * (complexity * 0.5)
-    max_wage = min_wage * 1.2
-    
-    # 5. Return the exact 5 variables Balraj needs!
-    return schemas.AssessResponse(
-        deepfake_status="PASS",
-        score=integrity_result["confidence_score"],
-        # MOCK HEATMAP: Ayansh will replace this string with the actual Grad-CAM image path on Day 4
-        heatmap="https://via.placeholder.com/400x300.png?text=Grad-CAM+Heatmap+Coming+Soon", 
-        wage_range_text=f"₹{int(min_wage)} - ₹{int(max_wage)}",
-        # MOCK AUDIO: Balraj will replace this with his Indic TTS path on Day 4
-        audio_filepath="https://www.soundjay.com/buttons/sounds/button-09.mp3" 
-    )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing video: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    finally:
+        # Always clean up the file, even if there's an error
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+            logger.info(f"Cleaned up temporary file: {file_path}")
