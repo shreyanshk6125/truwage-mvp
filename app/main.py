@@ -190,9 +190,9 @@ async def assess_video(
             return schemas.AssessResponse(
                 deepfake_status="FAIL",
                 score=integrity_result["confidence_score"],
-                heatmap="https://via.placeholder.com/400x300?text=Fake+Video+Detected",
+                heatmap=None,
                 wage_range_text="N/A",
-                audio_filepath=""
+                audio_filepath=None
             )
         
         # 5. Calculate mock wage
